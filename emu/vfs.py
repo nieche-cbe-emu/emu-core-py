@@ -19,12 +19,38 @@ def wwrite(mach, addr, s):
     mach.uc.mem_write(addr, b + b"\x00\x00")
     return len(s)
 
+def _ci_join(base, rel):
+
+    cur = base
+    parts = [c for c in rel.split("/") if c]
+    for i, comp in enumerate(parts):
+        exact = os.path.join(cur, comp)
+        if os.path.exists(exact):
+            cur = exact
+            continue
+        want = comp.lower()
+        hit = None
+        try:
+            for n in os.listdir(cur):
+                if n.lower() == want:
+                    hit = n
+                    break
+        except OSError:
+            pass
+        if hit is None:
+            return os.path.join(exact, *parts[i + 1:]) if i + 1 < len(parts) else exact
+        cur = os.path.join(cur, hit)
+    return cur
+
 class Vfs:
 
     def __init__(self, root, base=None):
         self.root = os.path.abspath(root)
         self.base = os.path.abspath(base) if base and os.path.isdir(base) else None
         os.makedirs(self.root, exist_ok=True)
+
+        if self.base is None:
+            os.makedirs(os.path.join(self.root, ".system", "MB_MSTAR_WQVGA"), exist_ok=True)
         self.handles = {}
         self.next_h = 1
         self.glue_synthesized = []
@@ -37,16 +63,17 @@ class Vfs:
         return p
 
     def host_path(self, dev, path):
-        return os.path.join(self.root, self._norm(path))
+
+        return _ci_join(self.root, self._norm(path))
 
     def resolve(self, dev, path):
 
         rel = self._norm(path)
-        over = os.path.join(self.root, rel)
+        over = _ci_join(self.root, rel)
         if os.path.exists(over):
             return over
         if self.base:
-            b = os.path.join(self.base, rel)
+            b = _ci_join(self.base, rel)
             if os.path.exists(b):
                 return b
         return over
