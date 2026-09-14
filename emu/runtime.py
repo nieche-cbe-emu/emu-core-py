@@ -1,6 +1,7 @@
 
 import collections
 import os
+from unicorn.arm_const import UC_ARM_REG_SP, UC_ARM_REG_LR
 from .machine import Machine
 from .hostabi import vm_printf
 from . import vmspec
@@ -71,6 +72,9 @@ class Runtime:
         self.screens = []
         self.pending = []
         self._installed = {}
+        self._methods = {}
+        self._co_frames = []
+        self._co_trap = None
         self.font = load_font()
         self.audio = Audio(self, outdir=f"out/{mod.name}/audio", play=audio)
         self.tick = 0
@@ -125,12 +129,23 @@ class Runtime:
         if (sysoff == self.OLD_GAMEMGR_SYSOFF
                 and getattr(self, "style", None) == self.ENTRY_OLD):
             return self._old_game_manager()
-        m = self.mach
         getter, tag = vmspec.SYS[sysoff]
+        return self._build_manager(sysoff, tag, tag or f"mgr{sysoff:02x}")
+
+    def manager_by_tag(self, tag):
+
+        tm = self.__dict__.setdefault("tag_managers", {})
+        if tag not in tm:
+            tm[tag] = self._build_manager(None, tag, tag)
+        return tm[tag]
+
+    def _build_manager(self, key, tag, name):
+        m = self.mach
 
         size = (vmspec.SIZE.get(tag, 0x400) or 0x400) + 0x100
-        addr = m.data.alloc(size, tag or f"mgr{sysoff:02x}")
-        self.managers[sysoff] = addr
+        addr = m.data.alloc(size, name)
+        if key is not None:
+            self.managers[key] = addr
         table = vmspec.MGR.get(tag, {})
         for off in range(0, size, 4):
             ent = table.get(off)
@@ -356,6 +371,48 @@ class Runtime:
         self.mach.w32(addr, self._installed[key])
         return self._installed[key]
 
+    def method(self, name, fn):
+
+        t = self._methods.get(name)
+        if t is None:
+            t = self._methods[name] = self.mach.new_trap(name, lambda mc, _f=fn: _f(mc, self))
+        return t
+
+    def cocall(self, mc, gen):
+        self._co_step(mc, gen, None, mc.lr(), mc.uc.reg_read(UC_ARM_REG_SP), first=True)
+
+    def _co_step(self, mc, gen, val, lr, sp, first=False):
+        try:
+            fn, args = gen.send(val)
+        except StopIteration as e:
+            mc.ret((e.value or 0) & 0xFFFFFFFF)
+            if not first:
+                mc.uc.reg_write(UC_ARM_REG_SP, sp)
+                mc.uc.reg_write(UC_ARM_REG_LR, lr)
+                mc._resume_pc = lr
+                mc.uc.emu_stop()
+            return
+        if self._co_trap is None:
+            self._co_trap = mc.new_trap("<hostco-return>", self._co_return)
+        extra = [a & 0xFFFFFFFF for a in args[4:]]
+        nsp = (sp - 4 * len(extra)) & ~7 if extra else sp
+        for i, a in enumerate(extra):
+            mc.w32(nsp + 4 * i, a)
+        for i, a in enumerate(args[:4]):
+            mc.setreg(i, a & 0xFFFFFFFF)
+        mc.uc.reg_write(UC_ARM_REG_SP, nsp)
+        self._co_frames.append((gen, lr, sp))
+        mc.uc.reg_write(UC_ARM_REG_LR, self._co_trap)
+        mc._resume_pc = fn
+        mc.uc.emu_stop()
+
+    def _co_return(self, mc):
+
+        if mc._resume_pc is not None or not self._co_frames:
+            return
+        gen, lr, sp = self._co_frames.pop()
+        self._co_step(mc, gen, mc.reg(0), lr, sp)
+
     def _vm_log(self, mc):
         msg = vm_printf(mc, mc.arg(0)).rstrip()
         self.logs.append(msg)
@@ -421,6 +478,63 @@ class Runtime:
         if sid == self.OLD_FETCH:
             self._old_fetch(mc)
             return
+        if sid == self.OLD_GAMELIB:
+            mc.ret(self._old_gamelib())
+            return
+        if sid == self.OLD_GAMELIB_COPY:
+            buf = mc.arg(1)
+            if buf:
+                tbl = self._old_gamelib()
+                mc.uc.mem_write(buf, bytes(mc.uc.mem_read(tbl, self.OLD_GAMELIB_COPY_SIZE)))
+            mc.ret(0)
+            return
+        if sid == 185:
+
+            frame = mc.arg(1)
+            if frame:
+                pp, n = mc.r32(frame), mc.r32(frame + 4)
+                apireg._gblock_alloc(mc, n)
+                p = mc.reg(0)
+                if pp:
+                    mc.w32(pp, p)
+                mc.uc.mem_write(frame + 8, bytes([1 if p else 0]))
+            mc.ret(0)
+            return
+        if sid == 190:
+
+            frame = mc.arg(1)
+            pp = mc.r32(frame) if frame else 0
+            if pp:
+                mc.w32(pp, 0)
+            mc.ret(0)
+            return
+        if sid in self.OLD_NET:
+            self._old_net(mc, sid)
+            return
+        fwd = self.OLD_FORWARD.get(sid)
+        if fwd:
+            tag, name, kind, n = fwd
+            frame = mc.arg(1)
+            if isinstance(n, str):
+                args = self._old_unpack(mc, frame, n)
+            else:
+                args = [mc.r32(frame + 4 * i) for i in range(n)] if frame else [0] * n
+
+            for i, v in enumerate(args[:4]):
+                mc.setreg(i, v)
+            sp = mc.uc.reg_read(UC_ARM_REG_SP)
+            extra = args[4:]
+            saved = bytes(mc.uc.mem_read(sp, 4 * len(extra))) if extra else b""
+            for i, v in enumerate(extra):
+                mc.w32(sp + 4 * i, v)
+            fn = apireg.lookup(tag, name)
+            if fn:
+                fn(mc, self)
+            else:
+                mc.ret(0)
+            if extra:
+                mc.uc.mem_write(sp, saved)
+            return
 
         obj = self._old_obj(sid)
         frame = mc.arg(1)
@@ -430,6 +544,106 @@ class Runtime:
 
     OLD_FETCH = 2001
 
+    OLD_FORWARD = {
+
+        183: ("VmMemoryManagerTag", "dF_InitMemory", "frame", 1),
+        142: ("VmMemoryManagerTag", "mF_GetGMemoryBlockPtr", "frame", 0),
+        103: ("VmMemoryManagerTag", "mF_InitMemoryBlock", "frame", 2),
+        184: ("VmMemoryManagerTag", "dF_ReleaseMemory", "frame", 0),
+
+        4: ("VmSysManagerTag", "VmEnterWinClose", "frame", 0),
+
+        61: ("GameManagerOldTag", "Storage_Date", "frame", "IIIBB"),
+
+        156: ("VmDFEnginelManagerTag", "DF_SendMessage", "frame", "IHI"),
+        1050: ("VmIoManagerTag", "Vm_file_open", "frame", 3),
+        1051: ("VmIoManagerTag", "Vm_file_write", "frame", 3),
+        1052: ("VmIoManagerTag", "Vm_file_close", "frame", 1),
+        1063: ("VmIoManagerTag", "Vm_file_read", "frame", 3),
+        1066: ("VmIoManagerTag", "Vm_file_getfilesize", "frame", 1),
+    }
+
+    def _old_unpack(self, mc, frame, spec):
+
+        out, off = [], 0
+        for c in spec:
+            w = {"I": 4, "H": 2, "B": 1}[c]
+            off = (off + w - 1) // w * w
+            if not frame:
+                out.append(0)
+            elif c == "I":
+                out.append(mc.r32(frame + off))
+            elif c == "H":
+                v = mc.r16(frame + off)
+                out.append((v - 0x10000 if v & 0x8000 else v) & 0xFFFFFFFF)
+            else:
+                out.append(mc.r8(frame + off))
+            off += w
+        return out
+
+    OLD_NET = (1004, 1005, 1006, 1030, 1031, 1057)
+
+    def _old_net(self, mc, sid):
+        frame = mc.arg(1)
+        if sid == 1004 and frame:
+            apireg._http(mc, self, mc.r32(frame), mc.r32(frame + 12), 0)
+            mc.ret(1)
+        elif sid == 1030:
+            mc.ret(1)
+        elif sid in (1006, 1031):
+            mc.ret(1)
+        else:
+            mc.ret(0)
+
+    OLD_GAMELIB = 143
+    OLD_GAMELIB_COPY = 82
+    OLD_GAMELIB_COPY_SIZE = 0x26c
+    OLD_GAMELIB_GAP = (0x114, 8)
+
+    gamelib_v3 = False
+
+    def _old_gamelib(self):
+        addr = self._old_objs.get("gamelib")
+        if addr:
+            return addr
+        self.gamelib_v3 = True
+        self.images.wide = self.fb.wide = True
+        self.fb.write_header()
+        base = self.get_manager(0x084)
+        tag = vmspec.SYS[0x084][1]
+        size = (vmspec.SIZE.get(tag, 0x400) or 0x400) + 0x100
+        addr = self.mach.data.alloc(size, "GameManagerOld@v3")
+        at, gap = self.OLD_GAMELIB_GAP
+        for off in range(0, size - gap, 4):
+            src = off if off < at else off + gap
+            self.mach.w32(addr + off, self.mach.r32(base + src))
+        self._old_gamelib_sms(addr)
+        self._old_objs["gamelib"] = addr
+        return addr
+
+    OLD_SMS_DIFF, OLD_SMS_ADD = 3764, 1376
+
+    def _old_gamelib_sms(self, addr):
+        m = self.mach
+
+        def api(tag, name):
+            fn = apireg.lookup(tag, name)
+            return lambda mc: fn(mc, self)
+
+        def send_sms(mc):
+
+            sp = mc.uc.reg_read(UC_ARM_REG_SP)
+            self.defer(mc.r32(sp + 4), (1,), "smsResult")
+            mc.ret(1)
+
+        pay = m.new_trap("BILLING_GetPayNumByAppId@v3", api("VmBillingManagerTag", "BILLING_GetPayNumByAppId"))
+        m.next_trap += self.OLD_SMS_DIFF // 4 - 1
+        remain = m.new_trap("BILLING_GetRemainDay@v3", api("VmBillingManagerTag", "BILLING_GetRemainDay"))
+        m.next_trap += self.OLD_SMS_ADD // 4 - 1
+        m.new_trap("vMSendSms@v3", send_sms)
+        m.w32(addr + 0x240, pay)
+        m.w32(addr + 0x244, remain)
+
     def _old_fetch(self, mc):
 
         desc = mc.arg(1)
@@ -437,9 +651,13 @@ class Runtime:
             mc.ret(0)
             return
         ptr, handle, ln = mc.r32(desc), mc.r32(desc + 4), mc.r32(desc + 8)
-        if ptr and ln >= 4:
 
+        if ptr and ln >= 4:
             mc.w32(ptr, handle)
+        elif ptr and ln == 2:
+            mc.uc.mem_write(ptr, (handle & 0xFFFF).to_bytes(2, 'little' if mc.le else 'big'))
+        elif ptr and ln == 1:
+            mc.uc.mem_write(ptr, bytes([handle & 0xFF]))
         mc.ret(1)
 
     def _old_helper(self):

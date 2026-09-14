@@ -6,6 +6,24 @@ def stride_of(w):
     return w + ((4 - w) & 3)
 
 class ImageStore:
+
+    wide = False
+
+    def header_size(self):
+        return 16 if self.wide else 12
+
+    def wh(self, addr):
+        m = self.mach
+        if self.wide:
+            return m.r32(addr + 4), m.r32(addr + 8)
+        return m.r16(addr + 4), m.r16(addr + 6)
+
+    def set_wh(self, addr, w, h, kind=0):
+        if self.wide:
+            self.mach.uc.mem_write(addr + 4, struct.pack(self.E + "IIB", w, h, kind) + b"\x00" * 3)
+        else:
+            self.mach.uc.mem_write(addr + 4, struct.pack(self.E + "HHB", w & 0xFFFF, h & 0xFFFF, kind) + b"\x00" * 3)
+
     def __init__(self, mach):
         self.mach = mach
         self.E = "<" if mach.le else ">"
@@ -24,9 +42,9 @@ class ImageStore:
             row = list(row) + [0] * (st - w)
             rows.extend(row)
         m.uc.mem_write(data, struct.pack(f"{self.E}{st * h}H", *rows))
-        vt = out_addr or m.heap.alloc(12, "VmImageType")
+        vt = out_addr or m.heap.alloc(self.header_size(), "VmImageType")
         m.w32(vt, data)
-        m.uc.mem_write(vt + 4, struct.pack(self.E + "HHI", w, h, 0))
+        self.set_wh(vt, w, h)
 
         src_mask = None
         tidx = img.get("transparent")
@@ -52,7 +70,7 @@ class ImageStore:
         if not addr:
             return None
         data = m.r32(addr)
-        w, h = m.r16(addr + 4), m.r16(addr + 6)
+        w, h = self.wh(addr)
         return data, w, h, stride_of(w)
 
     def blit(self, src, dst, dx, dy, w=None, h=None, sx=0, sy=0, alpha=False):

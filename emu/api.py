@@ -247,8 +247,8 @@ def get_current_time(mc, rt):
 
     p = mc.arg(0)
     if p:
-        mc.uc.mem_write(p, b"\x00" * 24)
-        mc.w32(p + 0, 2013)
+        for i, v in enumerate((2013, 1, 1, 0, 0, 0)):
+            mc.w32(p + 4 * i, v)
     mc.ret(0)
 
 @impl(BILL, "BILLING_GetPayNumByAppId")
@@ -256,10 +256,134 @@ def billing_paynum(mc, rt):
 
     mc.ret(0)
 
-@impl(BILL, None)
-def billing_ok(mc, rt):
+@impl(BILL, "BILLING_GetRemainDay")
+@impl(GAME, "BILLING_GetRemainDay")
+def billing_remain_day(mc, rt):
+
+    mc.ret(1 if mc.arg(1) == 3 else 0)
+
+@impl(BILL, "Billing_SendSpecSms")
+def billing_send_sms(mc, rt):
+
+    if mc.arg(0) != 14:
+        mc.ret(0)
+        return
+    rt.defer(mc.arg(6), (0,), "smsResult")
+    mc.ret(1)
+
+@impl(BILL, "BILLING_GetCdownOption5")
+def billing_cdown_option5(mc, rt):
+
+    mc.ret(0)
+
+@impl(BILL, "BILLING_Pay", "BILLING_PayMoreTimes", "BILLING_Pay2", "BILLING_Pay3")
+def billing_pay(mc, rt):
+
+    rt.defer(mc.arg(2), (1,), "payResult")
+    mc.ret(0)
+
+@impl(BILL, "BILLING_PayForCBB", "BILLING_PayForCBB3")
+def billing_pay_cbb(mc, rt):
+
+    rt.defer(mc.arg(3), (1,), "payResult")
+    mc.ret(0)
+
+@impl(BILL, "BILLING_PayForPwd")
+def billing_pay_pwd(mc, rt):
+
+    rt.defer(mc.arg(0), (1,), "payResult")
+    mc.ret(0)
+
+def _bill_reg(rt):
+
+    return rt.state.setdefault("billing_reg", {})
+
+@impl(BILL, "BILLING_IsRegisterBillingInfo")
+def billing_is_registered(mc, rt):
+
+    e = _bill_reg(rt).get(mc.arg(0) & 0xFFFF)
+    mc.ret(1 if e and e[1] else 0)
+
+@impl(BILL, "BILLING_RegisterBillingInfo")
+def billing_register_info(mc, rt):
+
+    _bill_reg(rt)[mc.arg(0) & 0xFFFF] = [0, 1]
+    mc.ret(1)
+
+@impl(BILL, "BILLING_SetBillingStatus")
+def billing_set_status(mc, rt):
+
+    e = _bill_reg(rt).get(mc.arg(0) & 0xFFFF)
+    if e:
+        e[0] = mc.arg(1) & 0xFF
+    mc.ret(1 if e else 0)
+
+@impl(BILL, "BILLING_GetBillingStatus")
+def billing_get_status(mc, rt):
+
+    e = _bill_reg(rt).get(mc.arg(0) & 0xFFFF)
+    mc.ret(e[0] if e else 1)
+
+@impl(BILL, "Billing_GetAppUsedStatus")
+def billing_get_used(mc, rt):
+
+    e = _bill_reg(rt).get(mc.arg(0) & 0xFFFF)
+    mc.ret(e[1] if e else 0)
+
+@impl(BILL, "Billing_SetAppUsedStatus")
+def billing_set_used(mc, rt):
+
+    e = _bill_reg(rt).get(mc.arg(0) & 0xFFFF)
+    if e:
+        e[1] = mc.arg(1) & 0xFF
+    mc.ret(0)
+
+@impl(BILL, "BILLING_CleanAppMonthBillInfo")
+def billing_clean_month(mc, rt):
+
+    _bill_reg(rt).pop(mc.arg(0) & 0xFFFF, None)
+    mc.ret(1)
+
+@impl(BILL, "BILLING_IsInTryStatus")
+def billing_in_try(mc, rt):
 
     mc.ret(1)
+
+@impl(BILL, "BILLING_GetTryDay")
+def billing_try_day(mc, rt):
+
+    mc.ret(1)
+
+@impl(BILL, "BILLING_GetValidDayByAppId")
+def billing_valid_day(mc, rt):
+
+    mc.ret(30)
+
+@impl(BILL, "BILLING_GetSmsNum")
+def billing_pay_times(mc, rt):
+
+    mc.ret(2)
+
+@impl(BILL, "CDownGetFileNameByAppID")
+def billing_file_name(mc, rt):
+
+    if mc.arg(1):
+        mc.w32(mc.arg(1), 0)
+    mc.ret(0)
+
+@impl(BILL, "Billing_CancelSms")
+def billing_cancel_sms(mc, rt):
+
+    rt.pending[:] = [p for p in rt.pending if p[2] != "smsResult"]
+    mc.ret(1)
+
+@impl(BILL, "BILLING_IsNeedPay", "CDownIsMonthApp", "BIllING_OpenBillingPromptWin",
+      "BILLING_GetBillSmsAddr", "BILLING_GetBillSmsSuf", "BILLING_GetPayTipContent",
+      "BILLING_CDownOption8", "BILLING_CDownOption9", "BILLING_CDownOption10", "BILLING_IsWPay",
+      "BILLING_NewMonthPay", "BILLING_NewMonthCancel", "BILLING_SendRegisterSms", "BILLING_Register")
+def billing_zero(mc, rt):
+
+    mc.ret(0)
 
 @impl(LCD, "VMGetLCDBuffer")
 def get_lcd_buffer(mc, rt):
@@ -277,12 +401,12 @@ def invalidate(mc, rt):
 @impl(LCD, "VMGetImageWidth")
 def img_w(mc, rt):
     p = mc.arg(0)
-    mc.ret(mc.r16(p + 4) if p else 0)
+    mc.ret(rt.images.wh(p)[0] & 0xFFFF if p else 0)
 
 @impl(LCD, "VMGetImageHeight")
 def img_h(mc, rt):
     p = mc.arg(0)
-    mc.ret(mc.r16(p + 6) if p else 0)
+    mc.ret(rt.images.wh(p)[1] & 0xFFFF if p else 0)
 
 @impl(LCD, "VMFillRectEx")
 def fill_rect_ex(mc, rt):
@@ -320,6 +444,58 @@ def _open_mode(mc, p):
         return m
     w = wstr(mc, p, 8)
     return w if any(c in w for c in "rwa") else "r"
+
+NV_SIZE = 10240
+
+def _nv_path(rt):
+    return os.path.join(paths.saves_dir(rt.mod.name), "nvram.bin")
+
+@impl(IO, "VmIoManager+0x80")
+def nv_read(mc, rt):
+    mc.ret(_nv_read(mc, rt, mc.arg(0), mc.arg(1), mc.arg(2), mc.arg(3)))
+
+@impl(IO, "VmIoManager+0x11c")
+def nv_write(mc, rt):
+    mc.ret(_nv_write(mc, rt, mc.arg(0), mc.arg(1), mc.arg(2), mc.arg(3)))
+
+def _nv_read(mc, rt, off, buf, n, okp):
+    ok = 0
+    try:
+        with open(_nv_path(rt), "rb") as f:
+            blob = f.read().ljust(NV_SIZE, b"\0")
+        if buf and off + n <= NV_SIZE:
+            mc.uc.mem_write(buf, blob[off:off + n])
+            ok = 1
+    except OSError:
+        pass
+    if okp:
+        mc.uc.mem_write(okp, bytes([ok]))
+    return ok
+
+def _nv_write(mc, rt, off, buf, n, okp):
+    ok = 0
+    if buf and off + n <= NV_SIZE:
+        path = _nv_path(rt)
+        try:
+            with open(path, "rb") as f:
+                blob = bytearray(f.read().ljust(NV_SIZE, b"\0")[:NV_SIZE])
+        except OSError:
+            blob = bytearray(NV_SIZE)
+        blob[off:off + n] = bytes(mc.uc.mem_read(buf, n))
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(blob)
+            ok = 1
+        except OSError:
+            pass
+    if okp:
+        mc.uc.mem_write(okp, bytes([ok]))
+    return ok
+
+@impl(IO, "VmIoManager+0x120")
+def nv_write_tail(mc, rt):
+    pass
 
 @impl(IO, "Vm_file_open")
 def file_open(mc, rt):
@@ -617,8 +793,41 @@ def strnicmp(mc, rt):
     b = (mc.cstr(mc.arg(1)) or b"")[:n].lower()
     mc.ret(0 if a == b else 1)
 
-@impl(IM, "reserver_func03", "reserver_func04")
-def im_reserved(mc, rt):
+@impl(IM, "reserver_func01")
+def im_sms(mc, rt):
+
+    d = mc.arg(0)
+    if d:
+        rt.defer(mc.r32(d + 16), (0,), "smsResult")
+        mc.uc.mem_write(d + 20, b"\x01")
+    mc.ret(1)
+
+def _desc_u16(mc, a):
+    b = bytes(mc.uc.mem_read(a, 2))
+    return int.from_bytes(b, "little" if mc.le else "big")
+
+@impl(IM, "reserver_func03")
+def im_nv_read(mc, rt):
+
+    d = mc.arg(0)
+    mc.ret(_nv_read(mc, rt, _desc_u16(mc, d), mc.r32(d + 4), _desc_u16(mc, d + 8),
+                    mc.r32(d + 12)) if d else 0)
+
+@impl(IM, "reserver_func04")
+def im_nv_write(mc, rt):
+    d = mc.arg(0)
+    mc.ret(_nv_write(mc, rt, _desc_u16(mc, d), mc.r32(d + 4), _desc_u16(mc, d + 8),
+                     mc.r32(d + 12)) if d else 0)
+
+@impl(IM, "reserver_func07")
+def im_get_aps_manager(mc, rt):
+
+    d = mc.arg(0)
+    dst = mc.r32(d) if d else 0
+    if dst:
+        n = min(_desc_u16(mc, d + 4), 156)
+        src = rt.manager_by_tag("VmDlAppStoreManagerTag")
+        mc.uc.mem_write(dst, bytes(mc.uc.mem_read(src, n)))
     mc.ret(0)
 
 HTTP_ALL_RECEIVED, HTTP_PART_RECEIVED, HTTP_RETRY, HTTP_CANCEL = 0, 1, 2, 3
@@ -822,7 +1031,7 @@ DP = {
 }
 DP_METHODS = [
     (0x20, "DP_LoadPackage", "dp_load"), (0x24, "DP_ReleasePackage", "dp_release"),
-    (0x28, "DP_LoadFromTResource", "dp_load"), (0x2c, "DP_LoadFormTCard", "dp_load"),
+    (0x28, "DP_LoadFromTResource", "dp_load_tres"), (0x2c, "DP_LoadFormTCard", "dp_load"),
     (0x30, "DP_DoLoading", "dp_noop"), (0x34, "DP_LocateDataPackage", "dp_locate"),
     (0x38, "DP_GetFile", "dp_get_file"), (0x3c, "DP_GetFileByID", "dp_get_by_id"),
     (0x40, "DP_GetFileNameByID", "dp_name_by_id"), (0x44, "DP_GetFileID", "dp_file_id"),
@@ -830,22 +1039,32 @@ DP_METHODS = [
     (0x50, "DF_DataPackage_InitTxt", "dp_noop"),
 ]
 
+DP_SIZE_OLD = 0x4c
+
+def _dp_size(rt):
+    return DP_SIZE_OLD if getattr(rt, "gamelib_v3", False) else 0x6c
+
 @impl(GAME, "initDFDataPackage")
 def init_df_datapackage(mc, rt):
 
     pkg, nsub = mc.arg(0), mc.arg(1) & 0xFFFF
+    size = _dp_size(rt)
     for off in (0x04, 0x0c, 0x10, 0x18, 0x1c, 0x64):
-        mc.w32(pkg + off, 0)
+        if off < size:
+            mc.w32(pkg + off, 0)
     mc.uc.mem_write(pkg + 0x08, b"\x00\x00\x00\x00")
     mc.uc.mem_write(pkg + 0x00, b"\x01")
-    mc.uc.mem_write(pkg + DP["isMomentRead"], b"\x00")
-    mc.w32(pkg + DP["file"], 0xFFFFFFFF)
+    if DP["file"] < size:
+        mc.uc.mem_write(pkg + DP["isMomentRead"], b"\x00")
+        mc.w32(pkg + DP["file"], 0xFFFFFFFF)
     subs = mc.heap.alloc(max(nsub, 1) * 4, "subDataPackage")
     mc.uc.mem_write(subs, b"\x00" * (max(nsub, 1) * 4))
     mc.w32(pkg + DP["subDataPackage"], subs)
+    rt.state.setdefault("pkg_wanted", {})[pkg] = []
     mc.uc.mem_write(pkg + DP["subPackageNum"], nsub.to_bytes(2, "little"))
     for off, name, fnname in DP_METHODS:
-        rt.install(pkg + off, name, globals()[fnname])
+        if off < size:
+            rt.install(pkg + off, name, globals()[fnname])
     rt.trace_io(f"initDFDataPackage(pkg={pkg:#x}, subPackageNum={nsub})")
     mc.ret(pkg)
 
@@ -879,7 +1098,8 @@ def _materialize(mc, rt, pkg, arch):
     mc.w32(pkg + DP["fileNameTable"], names_tbl)
     mc.w32(pkg + DP["fileOffsetTable"], offs_tbl)
     mc.w32(pkg + DP["fileData"], data_p)
-    mc.w32(pkg + DP["dataSize"], total)
+    if DP["dataSize"] < _dp_size(rt):
+        mc.w32(pkg + DP["dataSize"], total)
     mc.uc.mem_write(pkg + DP["isLoaded"], b"\x01")
     return n
 
@@ -929,9 +1149,65 @@ def dp_load(mc, rt):
     arch = _pick_archive(rt, name)
     n = _materialize(mc, rt, pkg, arch) if arch else 0
     rt.state.setdefault("pkg_arch", {})[pkg] = arch
+    if name:
+        wanted = rt.state.setdefault("pkg_wanted", {}).setdefault(pkg, [])
+        if name not in wanted:
+            wanted.append(name)
     mc.w32(pkg + DP["packageName"], mc.arg(1))
     rt.trace_io(f"DP_LoadPackage(pkg={pkg:#x}, {name!r}) -> {n} 个条目"
                 + ("" if not rt.mod.packages else f"（可选子包: {list(rt.mod.packages)[:6]}）"))
+    mc.ret(0)
+
+def _stream_packages(mc, ptr):
+
+    try:
+        head = bytes(mc.uc.mem_read(ptr, 12))
+    except Exception:
+        return None
+    hlen, _, count = struct.unpack("<3I", head)
+    if not (0 < count < 512) or not (8 <= hlen < 0x4000):
+        return None
+    try:
+        hdr = bytes(mc.uc.mem_read(ptr, hlen + 4 + 8))
+    except Exception:
+        return None
+    offs, o = [hlen + 4], 12
+    while o < hlen + 4:
+        ln = hdr[o]
+        offs.append(struct.unpack_from("<I", hdr, o + 1 + ln)[0])
+        o += 1 + ln + 4
+    last = max(offs)
+    try:
+        isz, dsz = struct.unpack("<2I", bytes(mc.uc.mem_read(ptr + last, 8)))
+        buf = bytes(mc.uc.mem_read(ptr, last + 4 + isz + dsz))
+    except Exception:
+        return None
+    from cbelib.container import _parse_multi
+    return _parse_multi(buf, 0, len(buf))
+
+def dp_load_tres(mc, rt):
+
+    pkg, ptr = mc.arg(0), mc.arg(1)
+    packs = _stream_packages(mc, ptr) if ptr else None
+    if not packs:
+        dp_load(mc, rt)
+        return
+    wanted = rt.state.get("pkg_wanted", {}).get(pkg, [])
+    key = ("tres", ptr, tuple(wanted))
+    arch = rt.state.get(key)
+    if arch is None:
+        arch = packs.get("")
+        for nm in wanted:
+            sub = packs.get(nm)
+            if sub is not None:
+                arch = sub if arch is None else _Combined(arch, sub)
+        if arch is None:
+            arch = next(iter(packs.values()))
+        rt.state[key] = arch
+    n = _materialize(mc, rt, pkg, arch)
+    rt.state.setdefault("pkg_arch", {})[pkg] = arch
+    rt.trace_io(f"DP_LoadFromTResource(pkg={pkg:#x}, data={ptr:#x}) -> {n} 个条目"
+                f"（容器子包: {list(packs)}，登记: {wanted}）")
     mc.ret(0)
 
 def dp_release(mc, rt):
@@ -946,6 +1222,8 @@ def dp_locate(mc, rt):
 def _entries(rt, pkg=None):
 
     m = rt.state.get("pkg_arch") or {}
+    if pkg is None:
+        pkg = rt.state.get("datapackage")
     a = m.get(pkg) if pkg is not None else None
     if a is None and m:
         a = next(iter(m.values()))
@@ -1047,6 +1325,16 @@ def img_from_stream(mc, rt):
 def img_from_res(mc, rt):
 
     p = mc.arg(0)
+    if p < 0x10000:
+
+        q = _res_ptr(mc, rt, p)
+        mc.setreg(0, q)
+        mc.setreg(1, 0)
+        if q:
+            img_from_stream(mc, rt)
+        else:
+            mc.ret(0)
+        return
     raw = mc.read_upto(p, 64)
     nul = raw.find(b"\x00")
     if 0 < nul <= 48:
@@ -1058,7 +1346,8 @@ def img_from_res(mc, rt):
                 mc.setreg(1, 0)
                 img_from_stream(mc, rt)
                 return
-    mc.setreg(1, mc.arg(1))
+
+    mc.setreg(1, 0)
     img_from_stream(mc, rt)
 
 @impl("VmGameLcdManagerTag", "CreateImage")
@@ -1495,10 +1784,78 @@ def audio_other(mc, rt):
 
     mc.ret(0)
 
-@impl(IM, "reserver_func01", "reserver_func02", "reserver_func05",
-      "reserver_func06", "reserver_func07", "reserver_func08")
+APS = "VmDlAppStoreManagerTag"
+APS_PATH = ".system/AS_MSTAR_WQVGA"
+
+@impl(APS, "vmAppStoreGetPath")
+def aps_path(mc, rt):
+    p = rt.state.get("aps_path")
+    if p is None:
+        p = rt.state["aps_path"] = mc.heap.alloc((len(APS_PATH) + 1) * 2, "aps_path")
+        wwrite(mc, p, APS_PATH)
+    mc.ret(p)
+
+@impl(APS, "vmGetRunAppFileSystem")
+def aps_get_dev(mc, rt):
+    mc.ret(rt.state.get("aps_dev", 0))
+
+@impl(APS, "vmSetRunAppFileSystem")
+def aps_set_dev(mc, rt):
+    rt.state["aps_dev"] = mc.arg(0) & 0xFF
+    mc.ret(0)
+
+@impl(APS, "vmGetAppNumByType")
+def aps_app_num(mc, rt):
+
+    if mc.arg(1):
+        mc.uc.mem_write(mc.arg(1), b"\0\0")
+    mc.ret(1)
+
+@impl(APS, "vmGetPhoneSupportApType")
+def aps_support_type(mc, rt):
+    mc.ret(2)
+
+@impl(APS, "vmGetSecurityCodeEx")
+def aps_security_code(mc, rt):
+
+    out, n = mc.arg(0), mc.arg(1)
+    if not out or n < 0x2B:
+        mc.ret(0)
+        return
+    st = (1103515245 * rt.state.get("rand", 0x12345678) + 12345) & 0x7FFFFFFF
+    rt.state["rand"] = st
+    rec = None
+    try:
+        with open(_nv_path(rt), "rb") as f:
+            blob = f.read().ljust(NV_SIZE, b"\0")
+        rec = blob[1897:1897 + 45]
+    except OSError:
+        pass
+    if not (rec and rec[0] == 0xE9 and len(rec[1:].split(b"\0")[0]) >= 8):
+        imei = DEVICE["imei"].encode()[:16]
+        r = bytearray(45)
+        r[0] = 0xE9
+        r[1:9] = b"%08X" % st
+        r[9:43] = b"1" * 34
+        r[9:9 + len(imei) + 1] = imei + b"\0"
+        r[26:26 + len(imei) + 1] = imei + b"\0"
+        rec = bytes(r)
+        tmp = rt.state.get("nvtmp")
+        if tmp is None:
+            tmp = rt.state["nvtmp"] = mc.heap.alloc(45, "nvtmp")
+        mc.uc.mem_write(tmp, rec)
+        _nv_write(mc, rt, 1897, tmp, 45, 0)
+    mc.uc.mem_write(out, rec[1:43])
+    mc.ret(1)
+
+@impl(IM, "reserver_func02", "reserver_func05", "reserver_func06", "reserver_func08")
 def im_reserved_more(mc, rt):
     mc.ret(0)
+
+@impl(SYS, "VmGetScreenSize")
+def sys_screen_type(mc, rt):
+
+    mc.ret(5)
 
 @impl(SYS, "vMAudioIsSupportInCb")
 def sys_audio_cap(mc, rt):
@@ -1625,7 +1982,7 @@ def cd_rect_point2(mc, rt):
 
     x, y, w, h = (_s32(mc.arg(i)) for i in range(4))
     px, py = _s32(mc.arg(4)), _s32(mc.arg(5))
-    mc.ret(1 if (x <= px <= x + w and y <= py <= y + h) else 0)
+    mc.ret(1 if (x <= px <= x + w - 1 and y <= py <= y + h - 1) else 0)
 
 @impl(UTIL, "CdRect2")
 @impl(GAME, "CdRect2")
@@ -1633,7 +1990,7 @@ def cd_rect2(mc, rt):
 
     ax, ay, aw, ah = (_s32(mc.arg(i)) for i in range(4))
     bx, by, bw, bh = (_s32(mc.arg(i)) for i in range(4, 8))
-    hit = ax <= bx + bw and bx <= ax + aw and ay <= by + bh and by <= ay + ah
+    hit = ax + aw - 1 >= bx and bx + bw - 1 >= ax and ay + ah - 1 >= by and by + bh - 1 >= ay
     mc.ret(1 if hit else 0)
 
 @impl(UTIL, "Sqrt")
@@ -1796,3 +2153,5 @@ def fill_rect_with_image(mc, rt):
             rt.images.blit(img, rt.fb.img, xx, yy,
                            min(iw, x + w - xx), min(ih, y + h - yy), 0, 0, alpha=True)
     mc.ret(1)
+
+from . import oldlib

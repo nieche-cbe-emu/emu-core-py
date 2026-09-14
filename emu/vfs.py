@@ -81,7 +81,7 @@ class Vfs:
     OPEN_FAIL = -1
 
     GLUE_PREFIXES = ("dfwsms", "dfwmix", "wpay", "cdlist", "cwstorecfg",
-                     "wstore_host", "coolbar_list")
+                     "wstore_host", "coolbar_list", "downinfo3")
 
     @classmethod
     def is_glue_file(cls, path):

@@ -10,18 +10,24 @@ class Framebuffer:
         self.buf = mach.heap.alloc(self.bytes, "LCD")
         mach.uc.mem_write(self.buf, b"\x00" * self.bytes)
 
-        self.img = mach.heap.alloc(12, "VmImageType(screen)")
+        self.img = mach.heap.alloc(16, "VmImageType(screen)")
         mach.w32(self.img, self.buf)
-        mach.uc.mem_write(self.img + 4, struct.pack(self.E + "HH", w, h) + b"\x00" * 4)
+        self.wide = False
+        self.write_header()
         self.frames = 0
+
+    def write_header(self):
+        if self.wide:
+            self.mach.uc.mem_write(self.img + 4, struct.pack(self.E + "II", self.w, self.h) + b"\x00" * 4)
+        else:
+            self.mach.uc.mem_write(self.img + 4, struct.pack(self.E + "HH", self.w, self.h) + b"\x00" * 8)
 
     def resize(self, w, h):
 
         self.w, self.h = w, h
         self.bytes = w * h * 2
         self.mach.uc.mem_write(self.buf, b"\x00" * self.bytes)
-        self.mach.uc.mem_write(self.img + 4,
-                               struct.pack(self.E + "HH", w, h) + b"\x00" * 4)
+        self.write_header()
 
     def fill_rect(self, x, y, w, h, color):
         x0, y0 = max(0, x), max(0, y)

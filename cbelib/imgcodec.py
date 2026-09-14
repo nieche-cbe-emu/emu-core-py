@@ -175,7 +175,8 @@ def _unfilter(raw, w, h, bpp):
 
 def decode_png(data):
 
-    if data[:8] != b"\x89PNG\r\n\x1a\n":
+    game = data[:8] == b"\x89PNGGAME"
+    if data[:8] != b"\x89PNG\r\n\x1a\n" and not game:
         raise ImgError("不是 PNG")
     o = 8
     idat = bytearray()
@@ -185,6 +186,15 @@ def decode_png(data):
     while o + 8 <= len(data):
         ln = struct.unpack_from(">I", data, o)[0]
         tag = data[o + 4:o + 8]
+        if game and tag == b"PLTE":
+            n = ln // 3
+            pal = bytearray()
+            for i in range(n):
+                v = struct.unpack_from("<H", data, o + 8 + 2 * i)[0]
+                pal += bytes(((v >> 11) << 3, ((v >> 5) & 0x3F) << 2, (v & 0x1F) << 3))
+            plte = bytes(pal)
+            o += 12 + 2 * n
+            continue
         body = data[o + 8:o + 8 + ln]
         if tag == b"IHDR":
             w, h, depth, ctype, _comp, _filt, interlace = struct.unpack(">IIBBBBB", body[:13])
