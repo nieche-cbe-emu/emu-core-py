@@ -57,10 +57,20 @@ class Vfs:
 
     @staticmethod
     def _norm(path):
+
         p = path.replace("\\", "/").lstrip("/")
         if len(p) > 1 and p[1] == ":":
             p = p[2:].lstrip("/")
-        return p
+        out = []
+        for comp in p.split("/"):
+            if not comp or comp == ".":
+                continue
+            if comp == "..":
+                if out:
+                    out.pop()
+                continue
+            out.append(comp)
+        return "/".join(out)
 
     def host_path(self, dev, path):
 

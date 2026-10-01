@@ -1751,9 +1751,13 @@ def audio_play_data(mc, rt):
 @impl(AUD, "vMAudioStop", "VmMp3StopBystream", "VmMp3StopByFile",
       "VmAMRStopPlay", "CB_AUD_StopPlayEx")
 def audio_stop(mc, rt):
-    from .audio import STOPPED
+    from .audio import PLAYING, STOPPED
+    was = rt.audio.state == PLAYING
     rt.audio.state = STOPPED
     rt.audio.stop_proc()
+
+    if was and rt.audio.on_event:
+        rt.audio.on_event({"op": "stop"})
     mc.ret(1)
 
 @impl(AUD, "vMAudioPause", "VmMp3PauseByStream", "VmMp3PauseByFile")

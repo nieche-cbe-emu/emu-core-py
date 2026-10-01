@@ -81,7 +81,7 @@ s.stop()                    # 必须调用：模块在 AppStop 里落存档
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `NIECHE_HOME` | `~/.nieche-emu` | 数据根：存档与模块虚拟文件系统 |
+| `NIECHE_HOME` | `~/.nieche-emu` | 数据根：存档、模块虚拟文件系统、落盘的音频 |
 | `NIECHE_FSBASE` | `assets/fatfs` | 虚拟文件系统的只读底层 |
 
 ## 目录
@@ -104,3 +104,7 @@ tools/ci.sh           # 全部验收项
 ## 说明
 
 本仓库只包含代码。游戏数据、手机固件与真机文件系统不在此处，也不提供。
+
+## 许可证
+
+GPL-2.0，见 LICENSE。第三方组件逐项见 THIRD-PARTY.md。

@@ -134,8 +134,9 @@ class Audio:
         self.current = name
         path = self._dump(data, name)
         if self.on_event:
+
             self.on_event({"op": "play", "path": path, "loop": bool(loop),
-                           "kind": ext, "name": name})
+                           "ext": ext, "name": name})
         else:
             self._spawn(path)
         self.events.append((self.rt.tick, f"播放 {name} ({sniff(data)}, ~{dur}ms, loop={loop})"))

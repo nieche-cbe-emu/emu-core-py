@@ -34,6 +34,10 @@ def fs_dir(module: str) -> str:
 
     return _sub("fs", safe(module))
 
+def audio_dir(module: str) -> str:
+
+    return _sub("audio", safe(module))
+
 def safe(name: str) -> str:
 
     out = "".join("_" if c in '/\\:*?"<>|' else c for c in (name or "unnamed"))
@@ -58,6 +62,7 @@ def describe() -> str:
     return (f"数据根目录：{home()}\n"
             f"  存档  {os.path.join(home(), 'saves')}/<模块名>/\n"
             f"  文件  {os.path.join(home(), 'fs')}/<模块名>/\n"
+            f"  音频  {os.path.join(home(), 'audio')}/<模块名>/\n"
             f"  配置  {config_path()}")
 
 if __name__ == "__main__":

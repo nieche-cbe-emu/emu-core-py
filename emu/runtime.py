@@ -76,7 +76,7 @@ class Runtime:
         self._co_frames = []
         self._co_trap = None
         self.font = load_font()
-        self.audio = Audio(self, outdir=f"out/{mod.name}/audio", play=audio)
+        self.audio = Audio(self, outdir=paths.audio_dir(mod.name), play=audio)
         self.tick = 0
         self.frame_ms = 40
         self.timers = {}
