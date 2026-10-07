@@ -70,6 +70,56 @@ def midi_duration_ms(d):
         pass
     return 1000
 
+_MP3_BR = {
+    1: {1: (0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448),
+        2: (0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384),
+        3: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)},
+    2: {1: (0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256),
+        2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160),
+        3: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)},
+}
+
+def mp3_duration_ms(d):
+
+    n = len(d)
+    o = 0
+    if d[:3] == b"ID3" and n >= 10:
+
+        o = 10 + ((d[6] & 0x7F) << 21 | (d[7] & 0x7F) << 14
+                  | (d[8] & 0x7F) << 7 | (d[9] & 0x7F))
+    i = o
+    while i + 4 <= n:
+        if d[i] == 0xFF and (d[i + 1] & 0xE0) == 0xE0:
+            ver = 1 if (d[i + 1] >> 3) & 1 else 2
+            layer = 4 - ((d[i + 1] >> 1) & 3)
+            bri = (d[i + 2] >> 4) & 0x0F
+            sri = (d[i + 2] >> 2) & 0x03
+            if layer in (1, 2, 3) and bri not in (0, 0x0F) and sri != 3:
+                kbps = _MP3_BR[ver][layer][bri]
+                if kbps:
+                    return max(100, (n - i) * 8 // kbps)
+        i += 1
+    return max(500, n * 8 // 32)
+
+def wav_duration_ms(d):
+
+    n = len(d)
+    if n < 44 or d[:4] != b"RIFF" or d[8:12] != b"WAVE":
+        return max(500, n // 8)
+    o, rate, data = 12, 0, 0
+    while o + 8 <= n:
+        tag = d[o:o + 4]
+        ln = struct.unpack_from("<I", d, o + 4)[0]
+        if tag == b"fmt " and ln >= 16:
+            rate = struct.unpack_from("<I", d, o + 16)[0]
+        elif tag == b"data":
+            data = min(ln, n - o - 8)
+            break
+        o += 8 + ln + (ln & 1)
+    if rate and data:
+        return max(100, data * 1000 // rate)
+    return max(500, n // 8)
+
 class Audio:
     def __init__(self, rt, outdir=None, play=False):
         self.rt = rt
@@ -125,7 +175,9 @@ class Audio:
         if ext == "mid":
             dur = midi_duration_ms(data)
         elif ext == "mp3":
-            dur = max(500, len(data) * 8 // 32)
+            dur = mp3_duration_ms(data)
+        elif ext == "wav":
+            dur = wav_duration_ms(data)
         else:
             dur = max(500, len(data) // 8)
         self.loop = loop
