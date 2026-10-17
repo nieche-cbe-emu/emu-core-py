@@ -53,6 +53,7 @@ class Vfs:
             os.makedirs(os.path.join(self.root, ".system", "MB_MSTAR_WQVGA"), exist_ok=True)
         self.handles = {}
         self.next_h = 1
+        self.self_path = None
         self.glue_synthesized = []
 
     @staticmethod
@@ -76,9 +77,14 @@ class Vfs:
 
         return _ci_join(self.root, self._norm(path))
 
+    SELF_PATH = "C:\\.nieche\\self.cbe"
+    SELF_NORM = ".nieche/self.cbe"
+
     def resolve(self, dev, path):
 
         rel = self._norm(path)
+        if rel.lower() == self.SELF_NORM and self.self_path:
+            return self.self_path
         over = _ci_join(self.root, rel)
         if os.path.exists(over):
             return over
@@ -101,6 +107,17 @@ class Vfs:
     def open(self, dev, path, mode):
 
         m0 = (mode or "r").lower()
+        if self._norm(path).lower() == self.SELF_NORM:
+
+            if any(c in m0 for c in "wa+") or not self.self_path:
+                return self.OPEN_FAIL
+            try:
+                f = open(self.self_path, "rb")
+            except OSError:
+                return self.OPEN_FAIL
+            h = self.next_h; self.next_h += 1
+            self.handles[h] = f
+            return h
         hp = self.host_path(dev, path) if ("w" in m0 or "a" in m0 or "+" in m0)            else self.resolve(dev, path)
         m = (mode or "r").lower()
         if not any(c in m for c in "rwa+"):

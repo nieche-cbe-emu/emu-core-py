@@ -1,4 +1,5 @@
 
+import bisect
 import os
 import struct
 
@@ -1041,14 +1042,34 @@ DP_METHODS = [
 
 DP_SIZE_OLD = 0x4c
 
-def _dp_size(rt):
-    return DP_SIZE_OLD if getattr(rt, "gamelib_v3", False) else 0x6c
+def _ro_words(rt):
+
+    w = rt.__dict__.get("_ro_words")
+    if w is None:
+        ro = rt.mod.ro
+        fmt = "<" if rt.mach.le else ">"
+        w = rt._ro_words = sorted(set(
+            struct.unpack_from(fmt + "I", ro, i)[0] for i in range(0, len(ro) - 3, 4)))
+    return w
+
+def _dp_size_for(rt, pkg):
+
+    if getattr(rt, "gamelib_v3", False):
+        return DP_SIZE_OLD
+    w = _ro_words(rt)
+    i = bisect.bisect_left(w, pkg + DP_SIZE_OLD)
+    return DP_SIZE_OLD if i < len(w) and w[i] < pkg + 0x6c else 0x6c
+
+def _dp_size(rt, pkg=None):
+    if getattr(rt, "gamelib_v3", False):
+        return DP_SIZE_OLD
+    return rt.state.get("dp_size", {}).get(pkg, 0x6c)
 
 @impl(GAME, "initDFDataPackage")
 def init_df_datapackage(mc, rt):
 
     pkg, nsub = mc.arg(0), mc.arg(1) & 0xFFFF
-    size = _dp_size(rt)
+    size = rt.state.setdefault("dp_size", {})[pkg] = _dp_size_for(rt, pkg)
     for off in (0x04, 0x0c, 0x10, 0x18, 0x1c, 0x64):
         if off < size:
             mc.w32(pkg + off, 0)
@@ -1064,9 +1085,35 @@ def init_df_datapackage(mc, rt):
     mc.uc.mem_write(pkg + DP["subPackageNum"], nsub.to_bytes(2, "little"))
     for off, name, fnname in DP_METHODS:
         if off < size:
+            if off == 0x44 and getattr(rt, "gamelib_v3", False):
+                _reserve_full_path(rt, pkg + off)
             rt.install(pkg + off, name, globals()[fnname])
     rt.trace_io(f"initDFDataPackage(pkg={pkg:#x}, subPackageNum={nsub})")
     mc.ret(pkg)
+
+FULL_PATH_GAP = 0x34
+
+def _reserve_full_path(rt, field):
+
+    if (field, "DP_GetFileID") in rt._installed:
+        return
+    rt.mach.new_trap("dfDataPackageGetFullPath",
+                     lambda mc, _rt=rt: dp_full_path(mc, _rt))
+    for _ in range(FULL_PATH_GAP // 4 - 1):
+        rt.mach.new_trap("dp_pad", None)
+
+def dp_full_path(mc, rt):
+
+    buf = rt.state.get("dp_full_path")
+    if buf is None:
+        from .vfs import Vfs
+        buf = mc.heap.alloc(0x204, "dfDataPackageGetFullPath")
+        mc.uc.mem_write(buf, b"\x00" * 0x200)
+        for i, ch in enumerate(Vfs.SELF_PATH):
+            mc.uc.mem_write(buf + 2 * i, ord(ch).to_bytes(2, "little" if mc.le else "big"))
+        mc.w32(buf + 0x200, getattr(rt.mod, "res_off", 0))
+        rt.state["dp_full_path"] = buf
+    mc.ret(buf)
 
 def _materialize(mc, rt, pkg, arch):
 
@@ -1098,63 +1145,78 @@ def _materialize(mc, rt, pkg, arch):
     mc.w32(pkg + DP["fileNameTable"], names_tbl)
     mc.w32(pkg + DP["fileOffsetTable"], offs_tbl)
     mc.w32(pkg + DP["fileData"], data_p)
-    if DP["dataSize"] < _dp_size(rt):
+    if DP["dataSize"] < _dp_size(rt, pkg):
         mc.w32(pkg + DP["dataSize"], total)
     mc.uc.mem_write(pkg + DP["isLoaded"], b"\x01")
     return n
 
 class _Combined:
 
-    def __init__(self, root, sub):
+    def __init__(self, *parts):
         pos, ents = {}, []
-        for e in list(root.entries) + list(sub.entries):
-            if e.name in pos:
-                ents[pos[e.name]] = e
-            else:
-                pos[e.name] = len(ents)
-                ents.append(e)
+        for part in parts:
+            if part is None:
+                continue
+            for e in part.entries:
+                if e.name in pos:
+                    ents[pos[e.name]] = e
+                else:
+                    pos[e.name] = len(ents)
+                    ents.append(e)
         self.entries = ents
         self.count = len(ents)
 
     def names(self):
         return [e.name for e in self.entries]
 
-def _pick_archive(rt, name):
+def _find_sub(pk, name):
+    arch = pk.get(name)
+    if arch is not None:
+        return name, arch
+    base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    for k, v in pk.items():
+        if k and (k == base or k.lower() == base.lower()):
+            return k, v
+    return None
+
+def _pick_archive(rt, names):
 
     pk = rt.mod.packages or {}
     root = pk.get("")
-    arch = None
-    if name and pk:
-        arch = pk.get(name)
-        if arch is None:
-            base = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-            for k, v in pk.items():
-                if k and (k == base or k.lower() == base.lower()):
-                    arch = v
-                    break
-    if arch is None:
+    subs = []
+    for name in names:
+        hit = _find_sub(pk, name) if name and pk else None
+        if hit and hit[1] is not root and all(hit[0] != k for k, _ in subs):
+            subs.append(hit)
+    if not subs:
         return root if root is not None else (rt.mod.res or rt.mod.icons)
-    if root is None or root is arch:
-        return arch
-    key = ("comb", name)
+    if root is None and len(subs) == 1:
+        return subs[0][1]
+    key = ("comb",) + tuple(k for k, _ in subs)
     c = rt.state.get(key)
     if c is None:
-        c = rt.state[key] = _Combined(root, arch)
+        c = rt.state[key] = _Combined(root, *(a for _, a in subs))
     return c
+
+def _registered(rt, pkg):
+    return rt.state.setdefault("pkg_wanted", {}).setdefault(pkg, [])
+
+def _mount(mc, rt, pkg, names):
+    arch = _pick_archive(rt, names)
+    n = _materialize(mc, rt, pkg, arch) if arch else 0
+    rt.state.setdefault("pkg_arch", {})[pkg] = arch
+    return n
 
 def dp_load(mc, rt):
 
     pkg = mc.arg(0)
     name = (mc.cstr(mc.arg(1)) or b"").decode("latin1")
-    arch = _pick_archive(rt, name)
-    n = _materialize(mc, rt, pkg, arch) if arch else 0
-    rt.state.setdefault("pkg_arch", {})[pkg] = arch
-    if name:
-        wanted = rt.state.setdefault("pkg_wanted", {}).setdefault(pkg, [])
-        if name not in wanted:
-            wanted.append(name)
+    wanted = _registered(rt, pkg)
+    if name and name not in wanted:
+        wanted.append(name)
+    n = _mount(mc, rt, pkg, wanted if name else [])
     mc.w32(pkg + DP["packageName"], mc.arg(1))
-    rt.trace_io(f"DP_LoadPackage(pkg={pkg:#x}, {name!r}) -> {n} 个条目"
+    rt.trace_io(f"DP_LoadPackage(pkg={pkg:#x}, {name!r}) -> {n} 个条目，登记: {wanted}"
                 + ("" if not rt.mod.packages else f"（可选子包: {list(rt.mod.packages)[:6]}）"))
     mc.ret(0)
 
@@ -1211,7 +1273,17 @@ def dp_load_tres(mc, rt):
     mc.ret(0)
 
 def dp_release(mc, rt):
-    mc.uc.mem_write(mc.arg(0) + DP["isLoaded"], b"\x00"); mc.ret(0)
+
+    pkg, np = mc.arg(0), mc.arg(1)
+    name = (mc.cstr(np) or b"").decode("latin1") if np else ""
+    wanted = _registered(rt, pkg)
+    if not name:
+        wanted.clear()
+        mc.uc.mem_write(pkg + DP["isLoaded"], b"\x00")
+    elif name in wanted:
+        wanted.remove(name)
+        _mount(mc, rt, pkg, wanted)
+    mc.ret(0)
 
 def dp_noop(mc, rt):
     mc.ret(0)
@@ -1219,12 +1291,58 @@ def dp_noop(mc, rt):
 def dp_locate(mc, rt):
     mc.ret(mc.arg(0))
 
+def _foreign(rt, pkg=None):
+
+    if pkg is None:
+        pkg = rt.state.get("datapackage")
+    if not pkg or pkg in (rt.state.get("pkg_arch") or {}) or not rt.mod.packages:
+        return None
+    m = rt.mach
+    try:
+        if m.r8(pkg + DP["isLoaded"]) != 1:
+            return None
+        n = _s16(m.r16(pkg + DP["subPackageNum"]))
+        subs = m.r32(pkg + DP["subDataPackage"])
+        if not (0 < n <= 64) or not subs:
+            return None
+        names = []
+        for i in range(n):
+            q = m.r32(subs + 4 * i)
+            if q:
+                nm = (m.cstr(m.r32(q + DP["packageName"])) or b"").decode("latin1")
+                if nm and nm not in names:
+                    names.append(nm)
+    except Exception:
+        return None
+    if not names:
+        return None
+    arch = _pick_archive(rt, names)
+    if arch is None:
+        return None
+    key = ("shadow", id(arch))
+    sh = rt.state.get(key)
+    if sh is None:
+        blob = b"".join(e.data for e in arch.entries)
+        data_p = m.heap.alloc(len(blob) or 1, "dp_shadow")
+        if blob:
+            m.uc.mem_write(data_p, blob)
+        offs, cur = [], 0
+        for e in arch.entries:
+            offs.append(cur)
+            cur += len(e.data)
+        sh = rt.state[key] = (arch, data_p, offs)
+    return sh
+
 def _entries(rt, pkg=None):
 
     m = rt.state.get("pkg_arch") or {}
     if pkg is None:
         pkg = rt.state.get("datapackage")
     a = m.get(pkg) if pkg is not None else None
+    if a is None and pkg is not None and pkg == rt.state.get("datapackage"):
+        f = _foreign(rt, pkg)
+        if f:
+            return f[0].entries
     if a is None and m:
         a = next(iter(m.values()))
     if a is None:
@@ -1269,8 +1387,7 @@ def dp_get_file(mc, rt):
 
 @impl(GAME, "SCREEN_ChangeScreen")
 def screen_change(mc, rt):
-    rt.screens.clear()
-    rt.push_screen(mc.arg(0), 0, 1)
+    rt.change_sub_screen(mc.arg(0))
     mc.ret(0)
 
 @impl(GAME, "SCREEN_NotifyLoadResource")
@@ -1425,6 +1542,10 @@ def _res_ptr(mc, rt, i):
     pkg = rt.state.get("datapackage")
     if not pkg:
         return 0
+    f = _foreign(rt, pkg)
+    if f:
+        _arch, data_p, offs = f
+        return data_p + offs[i] if 0 <= i < len(offs) else 0
     data = mc.r32(pkg + DP["fileData"])
     offs = mc.r32(pkg + DP["fileOffsetTable"])
     if not data or not offs or i < 0 or i >= len(_entries(rt)):
@@ -2017,7 +2138,7 @@ def _s32(v):
     return v - (1 << 32) if v >> 31 else v
 
 @impl(LCD, "VMCreateImage", "VMCreateImageFromInRes")
-def create_image(mc, rt):
+def vm_create_image(mc, rt):
 
     rid, out = mc.arg(0) & 0xFFFF, mc.arg(1)
     arch = rt.mod.icons or rt.mod.res

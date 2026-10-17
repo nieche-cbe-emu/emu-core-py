@@ -32,6 +32,7 @@ class Runtime:
         self.tick_spin = 0
         self.style = None
         self.managers = {}
+        self.init_dsts = set()
         self.screen_w, self.screen_h = screen
         self.state = {}
         self.net_responses = {}
@@ -66,10 +67,12 @@ class Runtime:
         self.images = ImageStore(m)
         self.frame_hook = None
         self.vfs = Vfs(fsroot or paths.fs_dir(mod.name), fsbase)
+        self.vfs.self_path = os.path.abspath(mod.path) if getattr(mod, "path", None) else None
         self.trace_fs = trace_fs
         self.finds = {}
         self.next_find = 1
         self.screens = []
+        self.sub_screen = 0
         self.pending = []
         self._installed = {}
         self._methods = {}
@@ -101,6 +104,11 @@ class Runtime:
             tag = vmspec.SYS[getoff][1]
             n = vmspec.SIZE.get(tag, 0x400) or 0x400
             if dst:
+
+                self.init_dsts.add(dst)
+                above = [d for d in self.init_dsts if d > dst]
+                if above:
+                    n = min(n, min(above) - dst)
                 mc.uc.mem_write(dst, bytes(mc.uc.mem_read(src, n)))
             mc.ret(0)
         return initer
@@ -183,7 +191,11 @@ class Runtime:
                     fn(mc, self)
                 except Exception as e:
 
-                    self.host_errors[(nm, type(e).__name__, str(e)[:60])] += 1
+                    key = (nm, type(e).__name__, str(e)[:60])
+                    self.host_errors[key] += 1
+
+                    if self.host_errors[key] == 1:
+                        self.logs.append(f"[宿主错误] {nm}: {type(e).__name__} {str(e)[:60]}")
                     mc.ret(0)
             else:
                 self.unimpl[(tag, off, nm)] += 1
@@ -206,6 +218,19 @@ class Runtime:
 
         self.defer(m.r32(scr + 4 * self.S_INIT), (param,), "screenInit")
         self.defer(m.r32(scr + 4 * self.S_LOADRES), (param,), "screenLoadResource")
+
+    def change_sub_screen(self, scr):
+
+        m = self.mach
+        old = self.sub_screen
+        if old:
+            self.defer(m.r32(old + 4 * self.S_DESTROY), (), "screenDestroy")
+        self.sub_screen = scr
+        self.screens.clear()
+        self.screens.append((scr, 0, 1))
+        self.defer(m.r32(scr + 4 * self.S_INIT), (0,), "screenInit")
+        if self.style == self.ENTRY_OLD:
+            self.defer(m.r32(scr + 4 * self.S_LOADRES), (0,), "screenLoadResource")
 
     def defer(self, fn, args=(), tag=""):
 
@@ -511,6 +536,29 @@ class Runtime:
         if sid in self.OLD_NET:
             self._old_net(mc, sid)
             return
+        if sid == self.OLD_WCSLEN:
+
+            p_, n_ = mc.arg(1), 0
+            while p_ and n_ < 0x10000 and mc.r16(p_ + 2 * n_):
+                n_ += 1
+            mc.ret(n_)
+            return
+        if sid == self.OLD_WSTR_WIDTH:
+
+            frame = mc.arg(1)
+            p_ = mc.r32(frame) if frame else 0
+            n_ = mc.r16(frame + 4) // 2 if frame else 0
+            raw = apireg.wstr(mc, p_, n_).encode("gb18030", "replace") if p_ and n_ else b""
+            mc.ret(apireg._text_width(self, raw) & 0xFFFF)
+            return
+        if sid == self.OLD_STR_WIDTH:
+
+            frame = mc.arg(1)
+            n = mc.r16(frame + 8) if frame else 0
+            sp_ = mc.r32(frame + 4) if frame else 0
+            raw = bytes(mc.uc.mem_read(sp_, n)) if sp_ and n else b""
+            mc.ret(apireg._text_width(self, raw.split(b"\x00", 1)[0]) & 0xFFFF)
+            return
         fwd = self.OLD_FORWARD.get(sid)
         if fwd:
             tag, name, kind, n = fwd
@@ -544,12 +592,21 @@ class Runtime:
 
     OLD_FETCH = 2001
 
+    OLD_STR_WIDTH = 1016
+
+    OLD_WCSLEN = 1048
+
+    OLD_WSTR_WIDTH = 1107
+
     OLD_FORWARD = {
 
         183: ("VmMemoryManagerTag", "dF_InitMemory", "frame", 1),
         142: ("VmMemoryManagerTag", "mF_GetGMemoryBlockPtr", "frame", 0),
         103: ("VmMemoryManagerTag", "mF_InitMemoryBlock", "frame", 2),
         184: ("VmMemoryManagerTag", "dF_ReleaseMemory", "frame", 0),
+
+        174: ("VmMemoryManagerTag", "mF_resetGmemoryBlock", "frame", 0),
+        175: ("VmMemoryManagerTag", "mF_MallocGmemoryBlock", "frame", 1),
 
         4: ("VmSysManagerTag", "VmEnterWinClose", "frame", 0),
 
@@ -561,6 +618,8 @@ class Runtime:
         1052: ("VmIoManagerTag", "Vm_file_close", "frame", 1),
         1063: ("VmIoManagerTag", "Vm_file_read", "frame", 3),
         1066: ("VmIoManagerTag", "Vm_file_getfilesize", "frame", 1),
+
+        1064: ("VmIoManagerTag", "Vm_file_seek", "frame", 3),
     }
 
     def _old_unpack(self, mc, frame, spec):
@@ -712,6 +771,10 @@ class Runtime:
 
         if self.style == self.ENTRY_OLD:
             self.game_tbl = m.new_table("GameManagerOld", 0x100, getters=True)
+
+            assert self.game_tbl + 8 <= m.DATA_BASE + 0x1000
+            m.w32(self.game_tbl + 0x00, 0xE51FF004)
+            m.w32(self.game_tbl + 0x04, m.new_trap("gm_TRACE", self._vm_log))
             m.w32(self.host + 0x0c, self.game_tbl)
 
         tramp = m.new_trap("OldSysCall", self._old_syscall)

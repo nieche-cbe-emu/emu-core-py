@@ -111,6 +111,8 @@ class Machine:
 
         self.rw_base = (self.rw_place(mod) if mod.load_base else self.RW_BASE)
 
+        self.r9_live = self.rw_base
+
         self._map()
         self.heap = Bump(self.HEAP_BASE, self.HEAP_SIZE)
         self.data = Bump(self.DATA_BASE, self.DATA_SIZE)
@@ -405,7 +407,7 @@ class Machine:
         for i, a in enumerate(args[:4]):
             self.setreg(i, a)
         u.reg_write(UC_ARM_REG_SP, self.STACK_BASE + self.STACK_SIZE - 0x1000)
-        u.reg_write(UC_ARM_REG_R9, self.rw_base)
+        u.reg_write(UC_ARM_REG_R9, self.r9_live)
         u.reg_write(UC_ARM_REG_LR, self.RETURN_MAGIC | 1)
         thumb = addr & 1
         start = addr | 1 if thumb else addr
@@ -437,4 +439,7 @@ class Machine:
                     break
         finally:
             self.in_emu = False
+        if self.exit_reason is None:
+
+            self.r9_live = u.reg_read(UC_ARM_REG_R9)
         return self.reg(0)

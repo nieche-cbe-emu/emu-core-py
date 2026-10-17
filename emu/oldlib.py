@@ -1,6 +1,10 @@
 
 import struct
 
+from unicorn.arm_const import UC_ARM_REG_SP as _SP
+
+from cbelib import lz
+
 from .api import impl, _s16
 
 GAME = "GameManagerOldTag"
@@ -8,6 +12,10 @@ SCREEN_W, SCREEN_H = 240, 400
 
 def _u16(v):
     return v & 0xFFFF
+
+def _s32(v):
+    v &= 0xFFFFFFFF
+    return v - 0x100000000 if v & 0x80000000 else v
 
 def _w16(mc, a, v):
     mc.uc.mem_write(a, struct.pack("<H" if mc.le else ">H", v & 0xFFFF))
@@ -262,19 +270,19 @@ def pic_create_blank(mc, rt):
 @_pic_method(0x1c)
 def pic_load(mc, rt):
 
-    lib = mc.arg(0)
+    n = _pic_load_name(mc, rt, mc.arg(0), (mc.cstr(mc.arg(1)) or b"").decode("latin1"))
+    mc.ret(n & 0xFFFFFFFF)
+
+def _pic_load_name(mc, rt, lib, name):
     api = _api()
-    name = (mc.cstr(mc.arg(1)) or b"").decode("latin1")
     rid = api._res_index(rt, name)
     n, cap = _rs16(mc, lib + 20), _rs16(mc, lib + 8)
     if rid < 0 or n >= cap:
-        mc.ret(0xFFFFFFFF)
-        return
+        return -1
     ids = mc.r32(lib + 12)
     for i in range(n):
         if _rs16(mc, ids + 2 * i) == _s16(rid):
-            mc.ret(i)
-            return
+            return i
     img = _alloc(mc, rt.images.header_size(), "piclib_img")
     mc.w32(mc.r32(lib + 16) + 4 * n, img)
     mc.setreg(0, api._res_ptr(mc, rt, rid))
@@ -282,7 +290,7 @@ def pic_load(mc, rt):
     api.img_from_stream(mc, rt)
     _w16(mc, ids + 2 * n, rid)
     _w16(mc, lib + 20, n + 1)
-    mc.ret(n)
+    return n
 
 @_pic_method(0x50)
 def pic_release(mc, rt):
@@ -390,8 +398,10 @@ def _noop(mc, rt):
 
 @impl(GAME, "initDFWindows")
 def init_repaint_panel(mc, rt):
-    p = mc.arg(0)
-    xy, wh, ud_logic, ud_paint, n = mc.arg(1), mc.arg(2), mc.arg(3), mc.arg(4), mc.arg(5)
+    _init_panel(mc, rt, mc.arg(0), mc.arg(1), mc.arg(2), mc.arg(3), mc.arg(4), mc.arg(5))
+    mc.ret(0)
+
+def _init_panel(mc, rt, p, xy, wh, ud_logic, ud_paint, n):
     table = _alloc(mc, 4 * n, "panel_dirty") if n else 0
     mc.w32(p + 12, table)
     for i in range(n):
@@ -413,7 +423,6 @@ def init_repaint_panel(mc, rt):
     mc.w32(p + 60, rt.method("DF_Windows+0x3c", panel_invalidate))
     mc.w32(p + 36, 0)
     _invalidate(mc, p, 4, p + 24)
-    mc.ret(0)
 
 def _last_sibling(mc, p):
     while mc.r32(p + 32):
@@ -1191,3 +1200,119 @@ def num_to_zhifei(mc, rt):
         mc.uc.mem_write(p, text)
         tab[key] = p
     mc.ret(tab[key])
+
+@impl(GAME, "initDFMap")
+def init_df_map(mc, rt):
+    m, xy, wh, lib = mc.arg(0), mc.arg(1), mc.arg(2), mc.arg(3)
+    sp = mc.uc.reg_read(_SP)
+    name_p, n = mc.r32(sp), mc.r32(sp + 4)
+    for off, nm, fn in _MAP_METHODS:
+        if off != 0x58:
+            mc.w32(m + off, rt.method(nm, fn))
+    mc.w32(m + 0x24, lib)
+    _init_panel(mc, rt, m + 0x28, xy, wh, m, m, n)
+    mc.w32(m + 0x58, rt.method("DF_Map+0x58", map_draw))
+    _w16(mc, m + 0x20, 0)
+    _w16(mc, m + 0x22, 0)
+    _map_load(mc, rt, m, (mc.cstr(name_p) or b"").decode("latin1"))
+    mc.ret(0)
+
+def _map_load(mc, rt, m, name):
+    api = _api()
+    ent = next((e for e in api._entries(rt) if e.name == name), None)
+    raw = (lz.unpack_entry(ent.data) if ent and ent.data and ent.data[0] == 2
+           else (ent.data if ent else b"")) or b""
+    pos = [0]
+
+    def rint():
+        if pos[0] + 4 > len(raw):
+            return 0
+        v = struct.unpack_from("<i", raw, pos[0])[0]
+        pos[0] += 4
+        return v
+
+    def rstr():
+        n_ = raw[pos[0]] if pos[0] < len(raw) else 0
+        s_ = raw[pos[0] + 1:pos[0] + 1 + n_]
+        pos[0] += 1 + n_
+        return s_.decode("latin1")
+
+    lib = mc.r32(m + 0x24)
+    nset = max(rint(), 0)
+    ids = _alloc(mc, 2 * nset, "map_tilesets")
+    mc.w32(m + 0x1c, ids)
+    for i in range(nset):
+        _w16(mc, ids + 2 * i, _pic_load_name(mc, rt, lib, rstr()))
+    pw, ph, tw, th = rint(), rint(), rint(), rint()
+    for i, v in enumerate((pw, ph, tw, th)):
+        mc.w32(m + 4 * i, v & 0xFFFFFFFF)
+    cols = _cdiv(pw, tw) if tw else 0
+    rows = _cdiv(ph, th) if th else 0
+    mc.w32(m + 0x10, cols & 0xFFFFFFFF)
+    mc.w32(m + 0x14, rows & 0xFFFFFFFF)
+    table = _alloc(mc, 4 * max(cols, 0), "map_cols")
+    mc.w32(m + 0x18, table)
+    for c in range(max(cols, 0)):
+        col = _alloc(mc, 4 * max(rows, 0), "map_cells")
+        mc.w32(table + 4 * c, col)
+        for r in range(max(rows, 0)):
+            mc.w32(col + 4 * r, rint() & 0xFFFFFFFF)
+
+def map_reload(mc, rt):
+    _map_load(mc, rt, mc.arg(0), (mc.cstr(mc.arg(1)) or b"").decode("latin1"))
+    mc.ret(0)
+
+def map_set_view(mc, rt):
+    m = mc.arg(0)
+    _w16(mc, m + 0x20, mc.arg(1))
+    _w16(mc, m + 0x22, mc.arg(2))
+    mc.ret(m)
+
+def map_move_view(mc, rt):
+    m = mc.arg(0)
+    _w16(mc, m + 0x20, _rs16(mc, m + 0x20) + _s16(mc.arg(1)))
+    _w16(mc, m + 0x22, _rs16(mc, m + 0x22) + _s16(mc.arg(2)))
+    mc.ret(m)
+
+def _map_cell(mc, m, col, row):
+    return mc.r32(mc.r32(mc.r32(m + 0x18) + 4 * col) + 4 * row)
+
+def map_draw(mc, rt):
+
+    m = mc.arg(0)
+    _map_draw(mc, rt, m, _rs16(mc, m + 64), _rs16(mc, m + 66),
+              _rs16(mc, m + 0x20), _rs16(mc, m + 0x22), 0, 0, SCREEN_W, SCREEN_H)
+    mc.ret(0)
+
+def _map_draw(mc, rt, m, sx, sy, vx, vy, ox, oy, w, h):
+    tw, th = _s32(mc.r32(m + 8)), _s32(mc.r32(m + 12))
+    cols, rows = _s32(mc.r32(m + 16)), _s32(mc.r32(m + 20))
+    if tw <= 0 or th <= 0:
+        return
+    lib = mc.r32(m + 0x24)
+    ids = mc.r32(m + 0x1c)
+    c0, r0 = max(_cdiv(vx + ox, tw), 0), max(_cdiv(vy + oy, th), 0)
+    c1 = min(_cdiv(w + vx + ox + tw - 1, tw), cols - 1)
+    r1 = min(_cdiv(h + vy + oy + th - 1, th), rows - 1)
+    target = mc.r32(lib + 4) or rt.fb.img
+    x = sx - _cmod(vx + ox, tw)
+    for c in range(c0, c1 + 1):
+        y = sy - _cmod(vy + oy, th)
+        for r in range(r0, r1 + 1):
+            cell = _map_cell(mc, m, c, r)
+            pic = _rs16(mc, ids + 2 * ((cell >> 24) & 0xF))
+            img = _pic_img(mc, lib, pic)
+            per_row = _cdiv(rt.images.wh(img)[0], tw)
+            frame = cell & 0xFFFFFF
+            if per_row > 0:
+                _clipped_blit(rt, target, img, _cmod(frame, per_row) * tw,
+                              _cdiv(frame, per_row) * th, tw, th, ox + x, oy + y, False)
+            y += th
+        x += tw
+
+_MAP_METHODS = (
+    (0x58, "DF_Map+0x58", map_draw),
+    (0x70, "DF_Map+0x70", map_reload),
+    (0x74, "DF_Map+0x74", map_set_view),
+    (0x78, "DF_Map+0x78", map_move_view),
+)

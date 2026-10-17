@@ -78,14 +78,37 @@ def _parse_res(buf: bytes, base: int, size: int, variant: bool = False) -> Optio
         entries.append(ResEntry(nm, off, end - off, buf[abs_off:abs_off + (end - off)]))
     return ResArchive(base, size, count, data_off, data_size, entries)
 
+def _multi_dir_end(buf: bytes, o: int, count: int, limit: int) -> int:
+    for _ in range(count):
+        if o >= limit:
+            break
+        ln = buf[o]
+        if ln == 0 or ln > 48 or o + 1 + ln + 4 > limit:
+            break
+        if not all(32 <= c < 127 for c in buf[o + 1:o + 1 + ln]):
+            break
+        o += 1 + ln + 4
+    return o
+
+def _multi_header(buf: bytes, base: int):
+
+    head = struct.unpack_from("<I", buf, base)[0]
+    limit = len(buf)
+    for cnt_at in (8, 4):
+        count = struct.unpack_from("<I", buf, base + cnt_at)[0]
+        if 0 < count < 512:
+            o = base + cnt_at + 4
+            if _multi_dir_end(buf, o, count, limit) - base - 4 == head:
+                return count, o
+    return struct.unpack_from("<I", buf, base + 8)[0], base + 12
+
 def _parse_multi(buf: bytes, base: int, size: int):
 
     if size < 16:
         return None
-    _a, _b, count = struct.unpack_from("<3I", buf, base)
+    count, o = _multi_header(buf, base)
     if not (0 < count < 512):
         return None
-    o = base + 12
     ents = []
     for _ in range(count):
         if o >= base + size:
@@ -143,6 +166,8 @@ class CbeModule:
     icons: Optional[ResArchive]
     res: Optional[ResArchive]
     packages: dict = field(default_factory=dict)
+
+    res_off: int = 0
 
     @property
     def bss_size(self):
@@ -218,5 +243,5 @@ def load(path: str) -> CbeModule:
         ro_off=ro_off, rw_off=rw_off, ro_chk=ro_chk, rw_chk=rw_chk,
         endian=_detect_endian(d),
         icons=_parse_res(d, ico_off, ico_sz),
-        res=res, packages=packs,
+        res=res, packages=packs, res_off=res_off,
     )
