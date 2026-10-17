@@ -8,6 +8,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cbelib
+from emu.cheat import Cheat
 from emu.runtime import Runtime
 
 class Session:
@@ -32,6 +33,7 @@ class Session:
         self._soft = None
 
         self._kev = self.rt.mach.data.alloc(4, "KeyEvent")
+        self.cheat = Cheat(self.rt.mach)
         self.frame_no = 0
         self.nlog = 0
         self.alive = True
@@ -158,6 +160,7 @@ class Session:
 
         self._apply_input(time.time() if now is None else now)
         event, data = self._key_event()
+        self.cheat.apply_locks()
         try:
             self.rt.frame(event, data)
         except Exception as e:
