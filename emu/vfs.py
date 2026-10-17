@@ -19,6 +19,22 @@ def wwrite(mach, addr, s):
     mach.uc.mem_write(addr, b + b"\x00\x00")
     return len(s)
 
+def downinfo_blob():
+
+    name = b"offline"
+    body = bytearray(b"\x00" * 8)
+    body += bytes([len(name)]) + name
+    body += b"\x00" + b"\x00\x00" + b"\x00\x01" + b"\x01" + b"\x00" * 12
+    body += b"\x01\x00\x00\x00\x00\x00\x00"
+    body += b"\x00" * 11
+    body += b"\x00" * (0x80 - len(body))
+    body[2:4] = (len(body) - 4).to_bytes(2, "big")
+    out = bytearray()
+    for i in range(0, len(body), 127):
+        chunk = body[i:i + 127]
+        out += bytes([0x80 | len(chunk)]) + chunk
+    return bytes(out)
+
 def _ci_join(base, rel):
 
     cur = base
@@ -104,6 +120,13 @@ class Vfs:
         base = cls._norm(path).split("/")[-1].lower()
         return base.startswith(cls.GLUE_PREFIXES)
 
+    @classmethod
+    def synth_content(cls, path):
+
+        if cls._norm(path).split("/")[-1].lower() == "downinfo.dat":
+            return downinfo_blob()
+        return None
+
     def open(self, dev, path, mode):
 
         m0 = (mode or "r").lower()
@@ -126,15 +149,22 @@ class Vfs:
         if not path or path.endswith(("\\", "/")):
             return self.OPEN_FAIL
         if not os.path.exists(hp):
-            if not create and self.is_glue_file(path):
+            synth = None if create else self.synth_content(path)
+            if synth is not None:
+                os.makedirs(os.path.dirname(hp), exist_ok=True)
+                with open(hp, "wb") as fh:
+                    fh.write(synth)
+                self.glue_synthesized.append(self._norm(path))
+            elif not create and self.is_glue_file(path):
 
                 os.makedirs(os.path.dirname(hp), exist_ok=True)
                 open(hp, "wb").close()
                 self.glue_synthesized.append(self._norm(path))
             elif not create:
                 return self.OPEN_FAIL
-            os.makedirs(os.path.dirname(hp), exist_ok=True)
-            open(hp, "wb").close()
+            if synth is None:
+                os.makedirs(os.path.dirname(hp), exist_ok=True)
+                open(hp, "wb").close()
         try:
             if "w" in m:
 

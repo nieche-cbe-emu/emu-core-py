@@ -33,6 +33,7 @@ class Runtime:
         self.style = None
         self.managers = {}
         self.init_dsts = set()
+        self.old_billing = False
         self.screen_w, self.screen_h = screen
         self.state = {}
         self.net_responses = {}
@@ -107,8 +108,11 @@ class Runtime:
 
                 self.init_dsts.add(dst)
                 above = [d for d in self.init_dsts if d > dst]
-                if above:
-                    n = min(n, min(above) - dst)
+                if above and min(above) - dst < n:
+                    n = min(above) - dst
+                    if tag == "VmBillingManagerTag":
+
+                        self.old_billing = True
                 mc.uc.mem_write(dst, bytes(mc.uc.mem_read(src, n)))
             mc.ret(0)
         return initer

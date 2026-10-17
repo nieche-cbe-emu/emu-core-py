@@ -269,7 +269,7 @@ def billing_send_sms(mc, rt):
     if mc.arg(0) != 14:
         mc.ret(0)
         return
-    rt.defer(mc.arg(6), (0,), "smsResult")
+    rt.defer(mc.arg(6), (1 if rt.old_billing else 0,), "smsResult")
     mc.ret(1)
 
 @impl(BILL, "BILLING_GetCdownOption5")
@@ -788,6 +788,7 @@ def stricmp(mc, rt):
     mc.ret(0 if a == b else 1)
 
 @impl(STD, "vMstrnicmp")
+@impl("VmGameUtilManagerTag", "Game_strnicmp")
 def strnicmp(mc, rt):
     n = mc.arg(2)
     a = (mc.cstr(mc.arg(0)) or b"")[:n].lower()
