@@ -15,11 +15,10 @@ class Session:
 
     REP_DELAY, REP_RATE = 0.40, 0.12
 
-    def __init__(self, path, audio=True, budget=40_000_000):
+    def __init__(self, path, audio=True):
         self.mod = cbelib.load(path)
         self.rt = Runtime(self.mod, trace=False, quiet_log=True,
                           trace_fs=False, audio=audio)
-        self.rt.mach.BUDGET = budget
         self.events = []
         if audio:
             self.rt.audio.on_event = lambda e: self.events.append(dict(e, kind="audio"))

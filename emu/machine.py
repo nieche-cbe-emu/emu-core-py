@@ -134,7 +134,7 @@ class Machine:
         self.uc.hook_add(UC_HOOK_CODE, self._on_trap,
                          begin=self.TRAP_BASE, end=self.TRAP_BASE + self.TRAP_SIZE - 1)
         self.next_native = 0
-        self.uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_bad_mem)
+        self._hook_unmapped()
         self.uc.hook_add(UC_HOOK_INTR, self._on_intr)
         self.semihost_out = bytearray()
         self.uc.hook_add(UC_HOOK_INSN_INVALID, self._on_bad_insn)
@@ -369,6 +369,15 @@ class Machine:
                UC_MEM_FETCH_UNMAPPED: "FETCH", UC_MEM_READ_PROT: "READ(prot)",
                UC_MEM_WRITE_PROT: "WRITE(prot)", UC_MEM_FETCH_PROT: "FETCH(prot)"}
 
+    def _hook_unmapped(self):
+
+        cur = 0
+        for b, e, _ in sorted(self.uc.mem_regions()):
+            if b > cur:
+                self.uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_bad_mem, begin=cur, end=b - 1)
+            cur = e + 1
+        self.uc.hook_add(UC_HOOK_MEM_UNMAPPED, self._on_bad_mem, begin=cur, end=(1 << 64) - 1)
+
     def _on_bad_mem(self, uc, access, address, size, value, user):
         pc = uc.reg_read(UC_ARM_REG_PC)
         kind = self._ACCESS.get(access, str(access))
@@ -397,7 +406,7 @@ class Machine:
         self.stubs = getattr(self, 'stubs', {})
         self.stubs[addr] = (name or f"stub@{addr:#x}", retval)
 
-    BUDGET = 100_000_000
+    TIMEOUT_US = 5_000_000
 
     def call(self, addr, args=(), timeout=0, count=0):
 
@@ -420,8 +429,8 @@ class Machine:
         try:
             while True:
                 try:
-                    u.emu_start(start, self.RETURN_MAGIC, timeout=timeout,
-                                count=count or self.BUDGET)
+                    u.emu_start(start, self.RETURN_MAGIC, timeout=timeout or self.TIMEOUT_US,
+                                count=count)
                 except UcError as e:
                     if self.exit_reason is None:
                         self.exit_reason = f"{e} pc={self.where(u.reg_read(UC_ARM_REG_PC))}"
@@ -439,6 +448,9 @@ class Machine:
                     break
         finally:
             self.in_emu = False
+        if self.exit_reason is None and (u.reg_read(UC_ARM_REG_PC) & ~1) != (self.RETURN_MAGIC & ~1):
+
+            self.exit_reason = f"单次调用超时 pc={self.where(u.reg_read(UC_ARM_REG_PC))}"
         if self.exit_reason is None:
 
             self.r9_live = u.reg_read(UC_ARM_REG_R9)
